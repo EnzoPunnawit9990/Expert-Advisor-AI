@@ -14,9 +14,18 @@
 //|  v2.05: UX/UI ใหม่ (สไตล์ SwingTradeBOT): กรอบเดียวพื้นดำ + Consolas|
 //|         SYMBOL ตรึง / คอลัมน์เลื่อนแนวนอน (Shift+ล้อเมาส์ หรือ ◄ ►)  |
 //|         คลิกแถว = เลือก, ดับเบิลคลิก = แผง Detail                   |
+//|  v2.06: ลบ Auto Fibonacci / Golden Zone ออกทั้งหมด                 |
+//|         ระบบ OB ใหม่ = ตรรกะเดียวกับ Pine "ORDER BLOCK QUALITY"     |
+//|         (Quality Score / Grade A+ A B C / ATR Strength / OB Width)   |
+//|         ดับเบิลคลิกที่ Symbol = หน้าต่าง Advanced OB Dashboard       |
+//|  v2.07: ลบปุ่มลูกศร ใช้ลูกกลิ้งเมาส์อย่างเดียว / หัวกรอบเหลือ US Stock, Other |
+//|         เพิ่มคอลัมน์ Trend (Bull/Bear) 1D 1H 30M 15M 1M ต่อจาก STATUS    |
+//|         Shift+ลูกกลิ้ง = เลื่อนซ้าย-ขวาแบบสมูท (แอนิเมชันเป็นพิกเซล)        |
+//|  v2.08: แอนิเมชันเปิด/ปิดหน้าต่าง Advanced OB Dashboard                  |
+//|         (Fade จากสีพื้นกราฟ + เลื่อนขึ้น 14px, Ease-out)                 |
 //+------------------------------------------------------------------+
 #property copyright "HQ-OB MT5 Scanner"
-#property version   "2.05"
+#property version   "2.08"
 
 //---------------------------------------------------------------- Enums
 enum ENUM_MITIGATION_METHOD
@@ -52,30 +61,35 @@ input group "% Change Reference"
 input ENUM_OPEN_REF OpenReference        = OPEN_PREV_CLOSE;
 input int    SessionGapHours             = 2;
 
-input group "Structure (BOS)  [เหมือนอินดิเคเตอร์]"
+input group "Structure (BOS)  [เหมือนอินดิเคเตอร์ HQ-OB-Q]"
 input int    SwingLength                 = 5;
-input int    MaxCandidateAge             = 50;
-input int    SwingQualifyAge             = 50;    // Swing ที่ยังไม่ผ่านเกณฑ์คุณภาพ รอได้นานสุดกี่แท่งนับจาก Pivot
+input int    MaxCandidateAge             = 50;    // Max Bars Waiting for BOS Confirmation
 
-input group "Displacement / ATR Quality Filter"
+input group "Displacement"
 input int    AtrLength                   = 14;
-input double MinDispStrength             = 1.0;   // OB ผ่านเมื่อ |close-open| >= ค่านี้ x ATR
+input double MinDispStrength             = 1.0;   // Minimum Displacement Strength (x ATR)
 
 input group "Imbalance (FVG)"
 input int    MaxObToFvgDistance          = 3;
 
 input group "Mitigation"
 input ENUM_MITIGATION_METHOD MitigationMethod = CLOSE_INSIDE_OB;
+input bool   ShowMitigatedOB             = true;  // true = Latest OB รวมที่ Mitigate แล้ว (สถานะ Retested), false = เฉพาะที่ยัง Fresh
 
-input group "Auto Fibonacci (ใช้ Qualified Swing เท่านั้น)"
-input ENUM_TIMEFRAMES FibTimeframe       = PERIOD_M5; // TF ที่ใช้หา Swing + กาง Fibo (ไม่ขึ้นกับ TF ของกราฟ)
-input int    FibLookbackBars             = 1500;      // จำนวนแท่ง M5 ที่ใช้สแกน
-input double FibMinLegATR                = 1.5;       // ขา Impulse ต้องยาวอย่างน้อยกี่ x ATR (กัน Swing เล็กๆ)
-input double FibGoldenUpper              = 0.618;     // ขอบ Golden Zone ที่ 1
-input double FibGoldenLower              = 0.786;     // ขอบ Golden Zone ที่ 2
-input bool   DrawFibOnChart              = true;      // กาง OBJ_FIBO บนกราฟปัจจุบัน
-input color  FibColor                    = clrDarkGray; // สีเส้น Fibo
-input color  FibGoldenColor              = clrGold;     // สีเส้น Golden Zone
+input group "ATR Strength"
+input double MinAtrShow                  = 3.0;   // Minimum ATR Strength to Display (x ATR)
+input double AtrFullScore                = 5.0;   // ATR Strength ที่ได้คะแนนเต็ม (Extreme Threshold)
+
+input group "OB Quality"
+input double MinQuality                  = 0.0;   // Minimum Quality Score to Display (0-100)
+input double IdealWidthATR               = 1.0;   // Ideal OB Width (x ATR) - ได้คะแนนเต็ม
+input double MaxWidthATR                 = 3.0;   // Max OB Width (x ATR) - กว้างกว่านี้ตัดทิ้ง
+input double BosIdealATR                 = 0.5;   // Ideal BOS Break Distance (x ATR)
+input double FvgIdealATR                 = 0.3;   // Ideal FVG Size (x ATR)
+input double WeightAtr                   = 30.0;  // Weight: ATR Strength
+input double WeightBosFvg                = 25.0;  // Weight: BOS + FVG
+input double WeightFresh                 = 20.0;  // Weight: Unmitigated (Freshness)
+input double WeightWidth                 = 25.0;  // Weight: OB Width
 
 input group "Dashboard"
 input bool   ShowAllSymbols              = true;   // true = แสดงทุก symbol, false = เฉพาะที่มี OB
@@ -83,8 +97,10 @@ input bool   ShowOnlyNotRetested         = false;  // (ShowAllSymbols=false) เ
 input ENUM_HQ_SORT SortMode              = SORT_PCT_DESC;
 input int    ViewRowsUS                  = 12;     // จำนวนแถวสูงสุดที่เห็นในกรอบ US (เกินนี้เลื่อนได้)
 input int    ViewRowsOther               = 10;     // จำนวนแถวสูงสุดที่เห็นในกรอบอื่นๆ
-input int    WheelStep                   = 3;      // เลื่อนแนวตั้งต่อ 1 notch / 1 คลิกปุ่ม ▲▼ (แถว)
-input int    HColStep                    = 1;      // เลื่อนแนวนอนต่อ 1 notch (Shift+wheel) / 1 คลิกปุ่ม ◄ ► (คอลัมน์)
+input int    WheelStep                   = 3;      // เลื่อนแนวตั้งต่อ 1 notch ของลูกกลิ้ง (แถว)
+input int    HScrollPx                   = 90;     // เลื่อนแนวนอนต่อ 1 notch ของ Shift+ลูกกลิ้ง (พิกเซล, เลื่อนแบบสมูท)
+input double CharPx                      = 7.0;    // ความกว้างตัวอักษร Consolas (px) ใช้ตัดข้อความที่ล้นขอบตอนเลื่อน
+input int    TrendBars                   = 300;    // จำนวนแท่งที่ใช้หา Trend ต่อ Time frame
 input color  FrameColor                  = C'0,170,255'; // สีกรอบ / หัวข้อ
 input string FontName                    = "Consolas";   // ฟอนต์ Dashboard
 input int    RefreshSeconds              = 10;
@@ -98,21 +114,8 @@ input bool   RequireStockInPath          = true;   // true = Path ต้อง�
 //---------------------------------------------------------------- Globals
 string   g_symbols[];
 datetime g_lastBar[];
-datetime g_lastBarFib[];
 ENUM_TIMEFRAMES g_tf;
 string   PFX = "HQOBS_";
-
-struct FibInfo
-  {
-   bool     ok;
-   int      dir;        // 1 = Bullish (Low->High), -1 = Bearish (High->Low)
-   double   pA;         // จุดเริ่ม Impulse (Qualified Swing)
-   double   pB;         // จุดจบ Impulse   (Qualified Swing)
-   datetime tA;
-   datetime tB;
-   double   gzLo;       // Golden Zone ต่ำ
-   double   gzHi;       // Golden Zone สูง
-  };
 
 struct ScanResult
   {
@@ -128,17 +131,25 @@ struct ScanResult
    double   obLow;
    datetime confirmTime;
    int      barsAgo;
-   bool     retested;
+   bool     retested;     // Mitigate แล้ว
    bool     us;           // true = หุ้นอเมริกา
-   FibInfo  fib;          // Fibonacci / Golden Zone (M5)
+   double   score;        // Quality Score 0-100
+   string   grade;        // A+ / A / B / C
+   double   atrX;         // ATR Strength (x ATR)
+   double   widthX;       // OB Width (x ATR)
+   double   bosX;         // ระยะ BOS (x ATR)
+   double   fvgX;         // ขนาด FVG (x ATR)
+   int      touches;      // จำนวนครั้งที่ราคาแตะโซนแต่ยังไม่ Mitigate
+   int      trend[5];     // Trend 1D, 1H, 30M, 15M, 1M (1 = Bull, -1 = Bear, 0 = n/a)
   };
 
 ScanResult g_cache[];
-FibInfo    g_fibCache[];
 
 //--- Dashboard state
 #define ROW_H    16
-#define N_COLS   6                        // PRICE, % CHG, LATEST OB, OB ZONE, STATUS, GOLDEN ZONE
+#define N_COLS   10                       // PRICE, % CHG, LATEST OB, OB ZONE, STATUS, TREND 1D/1H/30M/15M/1M
+#define POP_W    390                      // หน้าต่าง Advanced OB Dashboard (ดับเบิลคลิก)
+#define POP_H    202
 #define SYM_W    90                       // ความกว้างคอลัมน์ SYMBOL (ตรึง)
 #define PANEL_W  780
 #define VIEW_W   (PANEL_W - 16 - SYM_W)   // ความกว้างพื้นที่คอลัมน์ที่เลื่อนได้
@@ -147,7 +158,12 @@ ScanResult g_us[], g_ot[];          // รายการที่แยกก�
 bool       g_isUs[];
 string     g_usKw[];
 int        g_scrUs = 0, g_scrOt = 0;
-int        g_colScr = 0, g_colMax = 0, g_colFirst = 0, g_colLast = N_COLS;
+double     g_hOff = 0, g_hTarget = 0, g_hMax = 0;   // เลื่อนแนวนอนเป็นพิกเซล (ตำแหน่งจริง / เป้าหมาย / สูงสุด)
+bool       g_anim = false;                            // กำลังเลื่อนแบบแอนิเมชัน
+bool       g_light = false;                           // true = วาดซ้ำแบบเบา (อัปเดต object เดิม ไม่ลบทิ้งทั้งหมด)
+ulong      g_lastScanMs = 0;
+datetime   g_trBar[];                                 // แท่งล่าสุดที่คำนวณ Trend แล้ว (symbol*5 + tf)
+int        g_trVal[];                                 // ผล Trend ที่ cache ไว้
 bool       g_origMouseScroll = true;
 bool       g_origEvMove = false, g_origEvWheel = true;
 bool       g_inside = false;
@@ -156,9 +172,17 @@ int        g_usTop = 0, g_usBot = 0, g_otTop = 0, g_otBot = 0;
 int        g_usRow0 = 0, g_otRow0 = 0, g_viewUS = 1, g_viewOT = 1;
 
 string     g_sel = "";
-bool       g_detail = false;
+bool       g_detail = false;      // หน้าต่าง Advanced OB Dashboard เปิดอยู่หรือไม่ (สถานะที่ผู้ใช้ต้องการ)
+string     g_detailSym = "";
+int        g_popX = 0, g_popY = 0, g_popH = POP_H;
 string     g_lastClickSym = "";
 ulong      g_lastClickMs = 0;
+
+//--- Popup animation
+double     g_popT    = 0.0;        // ความคืบหน้า 0 = ปิดสนิท, 1 = เปิดเต็ม
+double     g_pe      = 1.0;        // ค่า ease-out ที่ใช้วาดจริง
+bool       g_popAnim = false;      // กำลังเล่นแอนิเมชันอยู่
+color      g_pbg     = clrBlack;   // สีพื้นกราฟ (ปลายทางของ Fade)
 
 color C_BG     = C'5,5,5';
 color C_HDR    = C'215,215,215';
@@ -166,33 +190,42 @@ color C_MUTED  = C'125,125,125';
 color C_GREEN  = C'0,230,90';
 color C_RED    = C'255,60,60';
 color C_YELLOW = C'255,215,0';
-color C_GOLD   = C'255,190,40';
 color C_SELBG  = C'18,40,62';
 
-//--- Fibo object state
-datetime   g_fibTA = 0, g_fibTB = 0;
-double     g_fibPA = 0, g_fibPB = 0;
+//--- ผสมสี a -> b ตาม t (0..1)
+color Blend(const color a, const color b, const double t)
+  {
+   int ar = (int)a & 0xFF, ag = ((int)a >> 8) & 0xFF, ab = ((int)a >> 16) & 0xFF;
+   int br = (int)b & 0xFF, bg = ((int)b >> 8) & 0xFF, bb = ((int)b >> 16) & 0xFF;
+   int r  = (int)MathRound(ar + (br - ar) * t);
+   int g  = (int)MathRound(ag + (bg - ag) * t);
+   int bl = (int)MathRound(ab + (bb - ab) * t);
+   return (color)(r | (g << 8) | (bl << 16));
+  }
 
-struct PendC
+color PC(const color c) { return Blend(g_pbg, c, g_pe); }   // สีที่ Fade ตามความคืบหน้า
+
+struct PendC             // Candidate ที่รอ BOS
   {
    double hi, lo;
+   int    obBar;
    int    dispBar;
    double swingRef;
+   double fvgX;          // ขนาด FVG (x ATR)
   };
 
-struct OBI
+struct OBI               // OB ที่ยืนยัน BOS แล้ว
   {
    int    dir;
    double hi, lo;
    int    confirmBar;
    bool   mit;
-  };
-
-struct SwingC            // Swing ที่ตรวจพบ แต่ยังไม่ผ่านเกณฑ์คุณภาพ
-  {
-   double price;
-   int    bar;
-   int    scanned;
+   double atrX;
+   double bosX;
+   double fvgX;
+   double widthX;
+   int    touches;
+   double score;
   };
 
 //+------------------------------------------------------------------+
@@ -206,8 +239,9 @@ int OnInit()
    ChartSetInteger(0, CHART_EVENT_MOUSE_WHEEL, true);
 
    BuildSymbolList();
-   EventSetTimer(RefreshSeconds);
+   EventSetMillisecondTimer(16);      // 16ms = แอนิเมชันเลื่อนซ้าย-ขวา / popup; สแกนตลาดทุก RefreshSeconds ใน OnTimer
    ScanAndDraw();
+   g_lastScanMs = GetTickCount64();
    return(INIT_SUCCEEDED);
   }
 
@@ -221,11 +255,53 @@ void OnDeinit(const int reason)
   }
 
 void OnTick() {}
-void OnTimer() { ScanAndDraw(); }
+void OnTimer()
+  {
+   // แอนิเมชันเลื่อนแนวนอน: ไหลเข้าหาเป้าหมายแบบ ease-out
+   if(g_anim)
+     {
+      double d = g_hTarget - g_hOff;
+      if(MathAbs(d) < 1.0)
+        {
+         g_hOff  = g_hTarget;
+         g_anim  = false;
+        }
+      else
+        {
+         double step = d * 0.3;
+         if(MathAbs(step) < 1.0) step = (d > 0) ? 1.0 : -1.0;
+         g_hOff += step;
+        }
+      g_light = true;
+      DrawDashboard();
+      g_light = false;
+     }
+
+   // แอนิเมชันเปิด/ปิดหน้าต่าง Advanced OB Dashboard
+   if(g_popAnim)
+     {
+      double target = g_detail ? 1.0 : 0.0;
+      if(g_popT < target)      g_popT = MathMin(target, g_popT + 0.09);   // เปิด ~0.2 วินาที
+      else if(g_popT > target) g_popT = MathMax(target, g_popT - 0.12);   // ปิดเร็วกว่าเล็กน้อย
+      if(g_popT == target) g_popAnim = false;
+
+      g_light = true;
+      DrawPopup();
+      g_light = false;
+      ChartRedraw();
+     }
+
+   ulong now = GetTickCount64();
+   if(now - g_lastScanMs >= (ulong)RefreshSeconds * 1000)
+     {
+      g_lastScanMs = now;
+      ScanAndDraw();
+     }
+  }
 
 //+------------------------------------------------------------------+
 //| COLUMN LAYOUT (SYMBOL ตรึง, คอลัมน์อื่นเลื่อนแนวนอนได้)             |
-//|   0 PRICE  1 % CHG  2 LATEST OB  3 OB ZONE  4 STATUS  5 GOLDEN ZONE |
+//|   0 PRICE  1 % CHG  2 LATEST OB  3 OB ZONE  4 STATUS               |
 //+------------------------------------------------------------------+
 int ColW(const int c)
   {
@@ -233,10 +309,14 @@ int ColW(const int c)
      {
       case 0: return 80;    // PRICE
       case 1: return 80;    // % CHG
-      case 2: return 90;    // LATEST OB
+      case 2: return 110;   // LATEST OB (+ Grade)
       case 3: return 160;   // OB ZONE
       case 4: return 105;   // STATUS
-      case 5: return 156;   // GOLDEN ZONE
+      case 5: return 56;    // TREND 1D
+      case 6: return 56;    // TREND 1H
+      case 7: return 56;    // TREND 30M
+      case 8: return 56;    // TREND 15M
+      case 9: return 56;    // TREND 1M
      }
    return 80;
   }
@@ -255,30 +335,80 @@ string ColHdr(const int c)
       case 2: return "LATEST OB";
       case 3: return "OB ZONE";
       case 4: return "STATUS";
-      case 5: return "GOLDEN ZONE";
+      case 5: return "1D";
+      case 6: return "1H";
+      case 7: return "30M";
+      case 8: return "15M";
+      case 9: return "1M";
      }
    return "";
   }
-
-//--- คอลัมน์สุดท้ายที่มองเห็น (exclusive) เมื่อเริ่มดูจากคอลัมน์ 'first'
-int VisibleLast(const int first)
+//+------------------------------------------------------------------+
+//| TREND ต่อ Time frame (1D, 1H, 30M, 15M, 1M)                       |
+//|  อิงโครงสร้างเดียวกับ BOS: ปิดทะลุ Swing High ล่าสุด = Bull        |
+//|  ปิดทะลุ Swing Low ล่าสุด = Bear (เอาการทะลุล่าสุดเป็น Trend)      |
+//+------------------------------------------------------------------+
+ENUM_TIMEFRAMES TrendTf(const int k)
   {
-   int w = 0, c = first;
-   while(c < N_COLS && w + ColW(c) <= VIEW_W)
+   switch(k)
      {
-      w += ColW(c);
-      c++;
+      case 0: return PERIOD_D1;
+      case 1: return PERIOD_H1;
+      case 2: return PERIOD_M30;
+      case 3: return PERIOD_M15;
+      case 4: return PERIOD_M1;
      }
-   return c;
+   return PERIOD_D1;
   }
 
-//--- ค่า first สูงสุดที่ยังเห็นคอลัมน์สุดท้าย
-int MaxColScr()
+int ComputeTrend(const string sym, const ENUM_TIMEFRAMES tf, bool &ok)
   {
-   for(int s = 0; s < N_COLS; s++)
-      if(VisibleLast(s) >= N_COLS) return s;
-   return 0;
+   ok = false;
+   MqlRates r[];
+   ArraySetAsSeries(r, false);
+   int n = CopyRates(sym, tf, 1, TrendBars, r);
+   if(n < SwingLength * 2 + 5) return 0;
+   ok = true;
+
+   double sh = 0, sl = 0, v;
+   bool   hh = false, hl = false;
+   int    tr = 0;
+   for(int i = 0; i < n; i++)
+     {
+      if(PivotHighAt(r, i, v)) { sh = v; hh = true; }
+      if(PivotLowAt(r, i, v))  { sl = v; hl = true; }
+      if(hh && r[i].close > sh) { tr =  1; hh = false; }
+      if(hl && r[i].close < sl) { tr = -1; hl = false; }
+     }
+   return tr;
   }
+
+int TrendOf(const int si, const int k)
+  {
+   string          sym  = g_symbols[si];
+   ENUM_TIMEFRAMES tf   = TrendTf(k);
+   int             slot = si * 5 + k;
+   datetime        bt   = iTime(sym, tf, 0);
+   if(bt != 0 && bt == g_trBar[slot]) return g_trVal[slot];
+
+   bool ok;
+   int  t = ComputeTrend(sym, tf, ok);
+   if(!ok) return g_trVal[slot];
+   g_trBar[slot] = bt;
+   g_trVal[slot] = t;
+   return t;
+  }
+
+//--- ตำแหน่ง x (พิกเซล) ของคอลัมน์ c เทียบจากต้นพื้นที่ที่เลื่อนได้
+int ColX(const int c)
+  {
+   int x = 0;
+   for(int i = 0; i < c; i++)
+      x += ColW(i);
+   return x;
+  }
+
+int TotalColsW() { return ColX(N_COLS); }
 
 //+------------------------------------------------------------------+
 //| Mouse wheel / ปุ่ม / คลิกแถว                                      |
@@ -308,16 +438,20 @@ void ScrollGroup(const int group, const int deltaRows)
    DrawDashboard();
   }
 
-//--- เลื่อนแนวนอน (ใช้ร่วมกันทั้งสองกรอบ) delta > 0 = ไปทางขวา
-void ScrollCols(const int deltaCols)
+//--- เลื่อนแนวนอนแบบสมูท (ใช้ร่วมกันทั้งสองกรอบ) dir > 0 = ไปทางขวา; OnTimer ทำแอนิเมชันให้
+void ScrollH(const int dir)
   {
-   g_colScr += deltaCols;
-   DrawDashboard();   // ถูกจำกัดช่วงใน DrawDashboard
+   g_hTarget = MathMax(0.0, MathMin(g_hMax, g_hTarget + dir * HScrollPx));
+   g_anim = true;
   }
 
-//--- คลิก = เลือกแถว, ดับเบิลคลิก = เปิด/ปิดแผง Detail (ไม่ส่งคำสั่งซื้อขาย)
+//--- คลิก = เลือกแถว, ดับเบิลคลิก = เปิด/ปิดหน้าต่าง Advanced OB Dashboard (ไม่ส่งคำสั่งซื้อขาย)
 void HandleClick(const int x, const int y)
   {
+   // คลิกบนหน้าต่าง popup = ไม่ทำอะไร (กันคลิกทะลุไปโดนแถวด้านล่าง) รวมช่วงที่กำลังปิดอยู่
+   if((g_detail || g_popT > 0.0) && x >= g_popX && x <= g_popX + POP_W && y >= g_popY && y <= g_popY + g_popH)
+      return;
+
    int g = GroupAt(x, y);
    if(g == 0) return;
 
@@ -339,7 +473,21 @@ void HandleClick(const int x, const int y)
    g_sel = sym;
    g_lastClickSym = sym;
    g_lastClickMs  = now;
-   if(dbl) g_detail = !g_detail;
+   if(dbl)
+     {
+      if(g_detail && g_detailSym == sym)
+        {
+         g_detail  = false;                // ดับเบิลคลิกซ้ำที่ Symbol เดิม = ปิด (เล่นแอนิเมชันปิด)
+         g_popAnim = true;
+        }
+      else
+        {
+         g_detail    = true;               // เปิด / สลับไป Symbol ใหม่
+         g_detailSym = sym;
+         PlacePopup(x, y);
+         g_popAnim   = true;
+        }
+     }
    DrawDashboard();
   }
 
@@ -360,8 +508,8 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       SetInside(g > 0);
       if(g > 0)
         {
-         if((flags & 0x0004) != 0)   // กด Shift ค้าง -> เลื่อนแนวนอน
-            ScrollCols((dparam < 0) ? HColStep : -HColStep);
+         if((flags & 0x0004) != 0)   // กด Shift ค้าง -> เลื่อนแนวนอนแบบสมูท
+            ScrollH((dparam < 0) ? 1 : -1);
          else
             ScrollGroup(g, (dparam < 0) ? WheelStep : -WheelStep);
         }
@@ -376,15 +524,14 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 
    if(id == CHARTEVENT_OBJECT_CLICK)
      {
-      if(StringFind(sparam, PFX + "btn_") != 0) return;
-      ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
-
-      if(sparam == PFX + "btn_us_up")      ScrollGroup(1, -WheelStep);
-      else if(sparam == PFX + "btn_us_dn") ScrollGroup(1,  WheelStep);
-      else if(sparam == PFX + "btn_ot_up") ScrollGroup(2, -WheelStep);
-      else if(sparam == PFX + "btn_ot_dn") ScrollGroup(2,  WheelStep);
-      else if(sparam == PFX + "btn_us_lf" || sparam == PFX + "btn_ot_lf") ScrollCols(-HColStep);
-      else if(sparam == PFX + "btn_us_rt" || sparam == PFX + "btn_ot_rt") ScrollCols( HColStep);
+      if(sparam == PFX + "pop_close")
+        {
+         ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
+         g_detail  = false;
+         g_popAnim = true;
+         DrawDashboard();
+         return;
+        }
      }
   }
 
@@ -394,10 +541,12 @@ void BuildSymbolList()
    int total = SymbolsTotal(UseMarketWatchOnly);
    ArrayResize(g_symbols, total);
    ArrayResize(g_lastBar, total);
-   ArrayResize(g_lastBarFib, total);
    ArrayResize(g_cache, total);
-   ArrayResize(g_fibCache, total);
    ArrayResize(g_isUs, total);
+   ArrayResize(g_trBar, total * 5);
+   ArrayResize(g_trVal, total * 5);
+   ArrayInitialize(g_trBar, 0);
+   ArrayInitialize(g_trVal, 0);
 
    string parts[];
    int np = StringSplit(UsKeywords, ';', parts);
@@ -419,7 +568,6 @@ void BuildSymbolList()
      {
       g_symbols[i] = SymbolName(i, UseMarketWatchOnly);
       g_lastBar[i] = 0;
-      g_lastBarFib[i] = 0;
       g_isUs[i]    = IsUsStock(g_symbols[i]);
       if(g_isUs[i]) usCount++;
       if(i < 8)
@@ -464,18 +612,6 @@ bool IsUsStock(const string sym)
   }
 
 //+------------------------------------------------------------------+
-void ResetFib(FibInfo &f)
-  {
-   f.ok   = false;
-   f.dir  = 0;
-   f.pA   = 0.0;
-   f.pB   = 0.0;
-   f.tA   = 0;
-   f.tB   = 0;
-   f.gzLo = 0.0;
-   f.gzHi = 0.0;
-  }
-
 void ResetResult(ScanResult &r, const string sym)
   {
    r.symbol      = sym;
@@ -492,7 +628,15 @@ void ResetResult(ScanResult &r, const string sym)
    r.barsAgo     = 0;
    r.retested    = false;
    r.us          = false;
-   ResetFib(r.fib);
+   r.score       = 0.0;
+   r.grade       = "";
+   r.atrX        = 0.0;
+   r.widthX      = 0.0;
+   r.bosX        = 0.0;
+   r.fvgX        = 0.0;
+   r.touches     = 0;
+   for(int k = 0; k < 5; k++)
+      r.trend[k] = 0;
   }
 
 //+------------------------------------------------------------------+
@@ -549,17 +693,20 @@ void RemPend(PendC &a[], int k)
    ArrayResize(a, n - 1);
   }
 
-void AddPend(PendC &a[], double hi, double lo, int dispBar, double sref)
+void AddPend(PendC &a[], double hi, double lo, int obBar, int dispBar, double sref, double fvgX)
   {
    int n = ArraySize(a);
    ArrayResize(a, n + 1);
    a[n].hi = hi;
    a[n].lo = lo;
+   a[n].obBar = obBar;
    a[n].dispBar = dispBar;
    a[n].swingRef = sref;
+   a[n].fvgX = fvgX;
   }
 
-void AddOBI(OBI &a[], int dir, double hi, double lo, int bar)
+void AddOBI(OBI &a[], int dir, double hi, double lo, int bar, double atrX, double bosX,
+            double fvgX, double widthX, int touches, double score)
   {
    int n = ArraySize(a);
    ArrayResize(a, n + 1);
@@ -568,6 +715,12 @@ void AddOBI(OBI &a[], int dir, double hi, double lo, int bar)
    a[n].lo = lo;
    a[n].confirmBar = bar;
    a[n].mit = false;
+   a[n].atrX = atrX;
+   a[n].bosX = bosX;
+   a[n].fvgX = fvgX;
+   a[n].widthX = widthX;
+   a[n].touches = touches;
+   a[n].score = score;
   }
 
 bool PivotHighAt(const MqlRates &r[], int i, double &val)
@@ -599,59 +752,56 @@ bool PivotLowAt(const MqlRates &r[], int i, double &val)
   }
 
 //+------------------------------------------------------------------+
-//| Swing Quality Filter                                             |
+//| Quality Score 0-100 + Grade (เหมือน calcScore / gradeOf ใน Pine)   |
 //+------------------------------------------------------------------+
-void AddSwing(SwingC &a[], double price, int bar)
+double CalcScore(const double strengthX, const double bosX, const double fvgX,
+                 const double widthX, const int touches)
   {
-   int n = ArraySize(a);
-   ArrayResize(a, n + 1);
-   a[n].price   = price;
-   a[n].bar     = bar;
-   a[n].scanned = bar;
+   double sAtr   = MathMin(strengthX / AtrFullScore, 1.0);
+   double sBos   = MathMin(bosX / BosIdealATR, 1.0);
+   double sFvg   = MathMin(fvgX / FvgIdealATR, 1.0);
+   double sBF    = 0.4 * sBos + 0.6 * sFvg;
+   double sFresh = (touches == 0) ? 1.0 : ((touches == 1) ? 0.5 : 0.0);
+   double wRange = MathMax(MaxWidthATR - IdealWidthATR, 0.01);
+   double sW     = (widthX <= IdealWidthATR) ? 1.0
+                   : ((widthX >= MaxWidthATR) ? 0.0 : 1.0 - (widthX - IdealWidthATR) / wRange);
+   double wSum   = WeightAtr + WeightBosFvg + WeightFresh + WeightWidth;
+   if(wSum <= 0.0) return 0.0;
+   return 100.0 * (sAtr * WeightAtr + sBF * WeightBosFvg + sFresh * WeightFresh + sW * WeightWidth) / wSum;
   }
 
-void RemSwing(SwingC &a[], int k)
+string GradeOf(const double s)
   {
-   int n = ArraySize(a);
-   for(int i = k; i < n - 1; i++)
-      a[i] = a[i + 1];
-   ArrayResize(a, n - 1);
+   if(s >= 85.0) return "A+";
+   if(s >= 70.0) return "A";
+   if(s >= 55.0) return "B";
+   return "C";
   }
 
-void QualifySwings(SwingC &sw[], const bool isHigh, const MqlRates &r[], const double &atr[],
-                   const int i, double &structPrice, int &structBar, bool &hasStruct)
+//--- สีเกรดเหมือน Pine (A+ เขียว / A น้ำเงิน / B เหลืองอำพัน / C เทา)
+color GradeColor(const string g)
   {
-   for(int s = ArraySize(sw) - 1; s >= 0; s--)
-     {
-      bool ok = false;
-      for(int k = sw[s].scanned + 1; k <= i && !ok; k++)
-        {
-         bool strong = (atr[k] > 0.0) &&
-                       (MathAbs(r[k].close - r[k].open) >= MinDispStrength * atr[k]);
-         if(isHigh)
-            ok = (strong && r[k].close < r[k].open) || (r[k].close > sw[s].price);
-         else
-            ok = (strong && r[k].close > r[k].open) || (r[k].close < sw[s].price);
-        }
-      sw[s].scanned = i;
+   if(g == "A+") return C'0,200,83';
+   if(g == "A")  return C'41,98,255';
+   if(g == "B")  return C'255,179,0';
+   return C'158,158,158';
+  }
 
-      if(ok)
-        {
-         if(sw[s].bar > structBar)
-           {
-            structPrice = sw[s].price;
-            structBar   = sw[s].bar;
-            hasStruct   = true;
-           }
-         RemSwing(sw, s);
-        }
-      else if(i - sw[s].bar > SwingQualifyAge)
-         RemSwing(sw, s);
-     }
+//--- addOB ของ Pine: ผ่านเกณฑ์ ATR Strength / Width / Quality เท่านั้นถึงจะเป็น OB
+void TryAddOB(OBI &obs[], const int dir, const double hi, const double lo, const int confirmBar,
+              const double atrVal, const double strX, const double bosX, const double fvgX,
+              const int touches)
+  {
+   double widthX = (atrVal > 0.0) ? (hi - lo) / atrVal : 0.0;
+   double score  = CalcScore(strX, bosX, fvgX, widthX, touches);
+   if(strX >= MinAtrShow && widthX <= MaxWidthATR && score >= MinQuality)
+      AddOBI(obs, dir, hi, lo, confirmBar, strX, bosX, fvgX, widthX, touches, score);
   }
 
 //+------------------------------------------------------------------+
-//| หา OB ล่าสุดที่เกิดขึ้น (ยืนยัน BOS ล่าสุด) ของ symbol เดียว        |
+//| หา OB ล่าสุด (ตรรกะเดียวกับ Pine "ORDER BLOCK QUALITY" / HQ-OB-Q)   |
+//|  OB Origin -> ATR Strength -> BOS + FVG -> Unmitigated ->          |
+//|  OB Width/ATR -> Quality Score                                     |
 //+------------------------------------------------------------------+
 bool ScanSymbolLatestOB(const string sym, ScanResult &res)
   {
@@ -664,13 +814,8 @@ bool ScanSymbolLatestOB(const string sym, ScanResult &res)
 
    double structHigh = 0, structLow = 0;
    bool   hasHigh = false, hasLow = false;
-   int    structHighBar = -1, structLowBar = -1;
    double atrSum = 0, atrPrev = 0;
 
-   double atrArr[];
-   ArrayResize(atrArr, size);
-
-   SwingC swH[], swL[];
    PendC pBull[], pBear[];
    OBI   obs[];
 
@@ -695,24 +840,19 @@ bool ScanSymbolLatestOB(const string sym, ScanResult &res)
          atrVal = atrPrev;
         }
 
-      atrArr[i] = atrVal;
-
-      //--- Swing structure + Swing Quality Filter
+      //--- Swing structure: ใช้ Pivot ล่าสุดตรงๆ เหมือน Pine
       double v;
-      if(PivotHighAt(rates, i, v)) AddSwing(swH, v, i - SwingLength);
-      if(PivotLowAt(rates, i, v))  AddSwing(swL, v, i - SwingLength);
+      if(PivotHighAt(rates, i, v)) { structHigh = v; hasHigh = true; }
+      if(PivotLowAt(rates, i, v))  { structLow  = v; hasLow  = true; }
 
-      QualifySwings(swH, true,  rates, atrArr, i, structHigh, structHighBar, hasHigh);
-      QualifySwings(swL, false, rates, atrArr, i, structLow,  structLowBar,  hasLow);
-
-      //--- Displacement + ATR Quality Filter
-      double body    = MathAbs(rates[i].close - rates[i].open);
-      bool   passATR = (atrVal > 0.0) && (body >= MinDispStrength * atrVal);
+      //--- Displacement
+      double body = MathAbs(rates[i].close - rates[i].open);
+      bool   passATR = (atrVal > 0.0) && (body / atrVal >= MinDispStrength);
 
       bool isBullDisp = passATR && rates[i].close > rates[i].open;
       bool isBearDisp = passATR && rates[i].close < rates[i].open;
 
-      //--- STEP 1: Displacement + FVG -> Pending
+      //--- STEP 1: Displacement + FVG -> Pending Candidate
       if(isBullDisp && hasHigh)
         {
          int originIdx = -1;
@@ -723,15 +863,17 @@ bool ScanSymbolLatestOB(const string sym, ScanResult &res)
            }
          if(originIdx >= 0)
            {
-            bool fvg = false;
+            double fvgMax = 0.0;
             for(int j = 0; j <= MaxObToFvgDistance; j++)
               {
                int idx = i - j;
                if(idx - 2 < 0) break;
-               if(rates[idx].low > rates[idx-2].high) fvg = true;
+               double g = rates[idx].low - rates[idx-2].high;
+               if(g > 0.0) fvgMax = MathMax(fvgMax, g);
               }
-            if(fvg)
-               AddPend(pBull, rates[i-originIdx].high, rates[i-originIdx].low, i, structHigh);
+            if(fvgMax > 0.0)
+               AddPend(pBull, rates[i-originIdx].high, rates[i-originIdx].low,
+                       i - originIdx, i, structHigh, fvgMax / atrVal);
            }
         }
 
@@ -745,19 +887,21 @@ bool ScanSymbolLatestOB(const string sym, ScanResult &res)
            }
          if(originIdx >= 0)
            {
-            bool fvg = false;
+            double fvgMax = 0.0;
             for(int j = 0; j <= MaxObToFvgDistance; j++)
               {
                int idx = i - j;
                if(idx - 2 < 0) break;
-               if(rates[idx].high < rates[idx-2].low) fvg = true;
+               double g = rates[idx-2].low - rates[idx].high;
+               if(g > 0.0) fvgMax = MathMax(fvgMax, g);
               }
-            if(fvg)
-               AddPend(pBear, rates[i-originIdx].high, rates[i-originIdx].low, i, structLow);
+            if(fvgMax > 0.0)
+               AddPend(pBear, rates[i-originIdx].high, rates[i-originIdx].low,
+                       i - originIdx, i, structLow, fvgMax / atrVal);
            }
         }
 
-      //--- STEP 2: BOS confirmation
+      //--- STEP 2: BOS confirmation (Bullish)
       for(int k = ArraySize(pBull) - 1; k >= 0; k--)
         {
          if(i - pBull[k].dispBar > MaxCandidateAge)
@@ -766,10 +910,24 @@ bool ScanSymbolLatestOB(const string sym, ScanResult &res)
             RemPend(pBull, k);
          else if(rates[i].close > pBull[k].swingRef && i > pBull[k].dispBar)
            {
-            AddOBI(obs, 1, pBull[k].hi, pBull[k].lo, i);
+            // ATR Strength: จาก High สูงสุดนับตั้งแต่แท่ง OB จนถึงตอนยืนยัน
+            double extremeHigh = rates[i].high;
+            for(int q = 0; q <= i - pBull[k].obBar; q++)
+               extremeHigh = MathMax(extremeHigh, rates[i - q].high);
+            double strX = (atrVal > 0.0) ? (extremeHigh - pBull[k].lo) / atrVal : 0.0;
+
+            // Unmitigated: นับแท่งที่แตะโซนหลัง Displacement จนถึงตอนยืนยัน
+            int touches = 0;
+            for(int q = 0; q <= i - pBull[k].dispBar - 1; q++)
+               if(rates[i - q].low <= pBull[k].hi) touches++;
+
+            double bosX = (atrVal > 0.0) ? (rates[i].close - pBull[k].swingRef) / atrVal : 0.0;
+            TryAddOB(obs, 1, pBull[k].hi, pBull[k].lo, i, atrVal, strX, bosX, pBull[k].fvgX, touches);
             RemPend(pBull, k);
            }
         }
+
+      //--- STEP 2: BOS confirmation (Bearish)
       for(int k = ArraySize(pBear) - 1; k >= 0; k--)
         {
          if(i - pBear[k].dispBar > MaxCandidateAge)
@@ -778,12 +936,22 @@ bool ScanSymbolLatestOB(const string sym, ScanResult &res)
             RemPend(pBear, k);
          else if(rates[i].close < pBear[k].swingRef && i > pBear[k].dispBar)
            {
-            AddOBI(obs, -1, pBear[k].hi, pBear[k].lo, i);
+            double extremeLow = rates[i].low;
+            for(int q = 0; q <= i - pBear[k].obBar; q++)
+               extremeLow = MathMin(extremeLow, rates[i - q].low);
+            double strX = (atrVal > 0.0) ? (pBear[k].hi - extremeLow) / atrVal : 0.0;
+
+            int touches = 0;
+            for(int q = 0; q <= i - pBear[k].dispBar - 1; q++)
+               if(rates[i - q].high >= pBear[k].lo) touches++;
+
+            double bosX = (atrVal > 0.0) ? (pBear[k].swingRef - rates[i].close) / atrVal : 0.0;
+            TryAddOB(obs, -1, pBear[k].hi, pBear[k].lo, i, atrVal, strX, bosX, pBear[k].fvgX, touches);
             RemPend(pBear, k);
            }
         }
 
-      //--- STEP 3: Mitigation
+      //--- STEP 3: Mitigation / อัปเดต Freshness + Quality Score
       for(int m = 0; m < ArraySize(obs); m++)
         {
          if(obs[m].mit) continue;
@@ -801,14 +969,29 @@ bool ScanSymbolLatestOB(const string sym, ScanResult &res)
             else if(MitigationMethod == CLOSE_INSIDE_OB)  isMit = rates[i].close >= obL && rates[i].close <= obH;
             else                                          isMit = rates[i].open < obL && rates[i].close > obH;
            }
-         if(isMit) obs[m].mit = true;
+
+         if(isMit)
+           {
+            obs[m].mit = true;
+            continue;
+           }
+
+         // แตะโซนแต่ยังไม่ Mitigate -> ลดคะแนน Freshness
+         bool touched = (obs[m].dir == 1) ? (rates[i].low <= obH) : (rates[i].high >= obL);
+         if(touched)
+           {
+            obs[m].touches++;
+            obs[m].score = CalcScore(obs[m].atrX, obs[m].bosX, obs[m].fvgX, obs[m].widthX, obs[m].touches);
+           }
         }
      }
 
-   int n = ArraySize(obs);
-   if(n == 0) return(true);
+   //--- เลือก OB ล่าสุด (ถ้า ShowMitigatedOB = false ข้าม OB ที่ Mitigate แล้ว)
+   int L = -1;
+   for(int m = ArraySize(obs) - 1; m >= 0; m--)
+      if(ShowMitigatedOB || !obs[m].mit) { L = m; break; }
+   if(L < 0) return(true);
 
-   int L = n - 1;
    res.hasOB       = true;
    res.dir         = obs[L].dir;
    res.obHigh      = obs[L].hi;
@@ -816,204 +999,14 @@ bool ScanSymbolLatestOB(const string sym, ScanResult &res)
    res.retested    = obs[L].mit;
    res.confirmTime = rates[obs[L].confirmBar].time;
    res.barsAgo     = (size - 1) - obs[L].confirmBar;
+   res.score       = obs[L].score;
+   res.grade       = GradeOf(obs[L].score);
+   res.atrX        = obs[L].atrX;
+   res.widthX      = obs[L].widthX;
+   res.bosX        = obs[L].bosX;
+   res.fvgX        = obs[L].fvgX;
+   res.touches     = obs[L].touches;
    return(true);
-  }
-
-//+------------------------------------------------------------------+
-//| Auto Fibonacci: หา Impulse จาก Qualified Swing High/Low (M5)      |
-//|  - ใช้ Swing ที่ผ่าน QualifySwings เดิมเท่านั้น                    |
-//|  - Bullish: Qualified Low -> Qualified High (High เป็นจุดล่าสุด)   |
-//|  - Bearish: Qualified High -> Qualified Low (Low เป็นจุดล่าสุด)    |
-//|  - ถ้าหาไม่ได้ / ขาสั้นเกินไป / Impulse ถูกทำลาย -> fi.ok = false  |
-//| คืนค่า false เฉพาะกรณีข้อมูลไม่พอ (เพื่อไม่ให้ cache)              |
-//+------------------------------------------------------------------+
-bool ScanSymbolFib(const string sym, FibInfo &fi)
-  {
-   ResetFib(fi);
-
-   MqlRates rates[];
-   ArraySetAsSeries(rates, false);
-   int size = CopyRates(sym, FibTimeframe, 1, FibLookbackBars, rates);
-   if(size < SwingLength * 2 + AtrLength + 5) return(false);
-
-   double structHigh = 0, structLow = 0;
-   bool   hasHigh = false, hasLow = false;
-   int    structHighBar = -1, structLowBar = -1;
-   double atrSum = 0, atrPrev = 0;
-
-   double atrArr[];
-   ArrayResize(atrArr, size);
-
-   SwingC swH[], swL[];     // Swing ที่รอการตรวจคุณภาพ
-   SwingC qH[], qL[];       // Qualified Swing (เรียงตามแท่ง เก่า -> ใหม่)
-
-   for(int i = 0; i < size; i++)
-     {
-      //--- ATR (RMA) เหมือนเดิม
-      double tr = (i == 0) ? (rates[i].high - rates[i].low)
-                  : MathMax(rates[i].high - rates[i].low,
-                            MathMax(MathAbs(rates[i].high - rates[i-1].close),
-                                    MathAbs(rates[i].low  - rates[i-1].close)));
-      double atrVal = 0;
-      if(i < AtrLength - 1)
-         atrSum += tr;
-      else if(i == AtrLength - 1)
-        {
-         atrPrev = (atrSum + tr) / AtrLength;
-         atrVal = atrPrev;
-        }
-      else
-        {
-         atrPrev = (atrPrev * (AtrLength - 1) + tr) / AtrLength;
-         atrVal = atrPrev;
-        }
-      atrArr[i] = atrVal;
-
-      //--- Swing + Swing Quality Filter (ฟังก์ชันเดิม)
-      double v;
-      if(PivotHighAt(rates, i, v)) AddSwing(swH, v, i - SwingLength);
-      if(PivotLowAt(rates, i, v))  AddSwing(swL, v, i - SwingLength);
-
-      int prevHB = structHighBar;
-      int prevLB = structLowBar;
-      QualifySwings(swH, true,  rates, atrArr, i, structHigh, structHighBar, hasHigh);
-      QualifySwings(swL, false, rates, atrArr, i, structLow,  structLowBar,  hasLow);
-
-      //--- เก็บเฉพาะ Swing ที่เพิ่งผ่านเกณฑ์
-      if(structHighBar != prevHB) AddSwing(qH, structHigh, structHighBar);
-      if(structLowBar  != prevLB) AddSwing(qL, structLow,  structLowBar);
-     }
-
-   int nH = ArraySize(qH);
-   int nL = ArraySize(qL);
-   if(nH < 1 || nL < 1) return(true);                 // ยังไม่มีคู่ Qualified Swing -> N/A
-
-   int lastH = qH[nH-1].bar;
-   int lastL = qL[nL-1].bar;
-   if(lastH == lastL) return(true);
-
-   bool   bull = (lastH > lastL);                     // จุดล่าสุดเป็น High = Bullish impulse
-   int    endBar, startBar;
-   double endP, startP;
-
-   if(bull)
-     {
-      endBar = lastH;
-      endP   = qH[nH-1].price;
-      int prevBound = (nH >= 2) ? qH[nH-2].bar : -1;  // เอา Low ที่ต่ำสุดในช่วงระหว่าง High ก่อนหน้า -> High ล่าสุด
-      int best = -1;
-      for(int k = nL - 1; k >= 0; k--)
-        {
-         if(qL[k].bar >= endBar) continue;
-         if(qL[k].bar <= prevBound) break;
-         if(best < 0 || qL[k].price < qL[best].price) best = k;
-        }
-      if(best < 0) best = nL - 1;                     // fallback: Qualified Low ล่าสุด
-      startBar = qL[best].bar;
-      startP   = qL[best].price;
-      if(!(endP > startP)) return(true);
-     }
-   else
-     {
-      endBar = lastL;
-      endP   = qL[nL-1].price;
-      int prevBound = (nL >= 2) ? qL[nL-2].bar : -1;  // เอา High ที่สูงสุดในช่วงระหว่าง Low ก่อนหน้า -> Low ล่าสุด
-      int best = -1;
-      for(int k = nH - 1; k >= 0; k--)
-        {
-         if(qH[k].bar >= endBar) continue;
-         if(qH[k].bar <= prevBound) break;
-         if(best < 0 || qH[k].price > qH[best].price) best = k;
-        }
-      if(best < 0) best = nH - 1;
-      startBar = qH[best].bar;
-      startP   = qH[best].price;
-      if(!(startP > endP)) return(true);
-     }
-
-   //--- ขา Impulse ต้องใหญ่พอ (ไม่ใช้ Pivot เล็กๆ)
-   double range = MathAbs(endP - startP);
-   double atrNow = atrArr[size - 1];
-   if(atrNow <= 0.0 || range < FibMinLegATR * atrNow) return(true);
-
-   //--- Impulse ถูกทำลาย (ราคาปิดทะลุจุดเริ่ม) -> ไม่ใช้
-   for(int j = endBar + 1; j < size; j++)
-     {
-      if(bull  && rates[j].close < startP) return(true);
-      if(!bull && rates[j].close > startP) return(true);
-     }
-
-   //--- Golden Zone (0.618 - 0.786 retracement จากจุดจบ Impulse)
-   double p1, p2;
-   if(bull)
-     {
-      p1 = endP - FibGoldenUpper * range;
-      p2 = endP - FibGoldenLower * range;
-     }
-   else
-     {
-      p1 = endP + FibGoldenUpper * range;
-      p2 = endP + FibGoldenLower * range;
-     }
-
-   fi.ok   = true;
-   fi.dir  = bull ? 1 : -1;
-   fi.pA   = startP;
-   fi.pB   = endP;
-   fi.tA   = rates[startBar].time;
-   fi.tB   = rates[endBar].time;
-   fi.gzLo = MathMin(p1, p2);
-   fi.gzHi = MathMax(p1, p2);
-   return(true);
-  }
-
-//+------------------------------------------------------------------+
-//| วาด / อัปเดต OBJ_FIBO บนกราฟปัจจุบัน                              |
-//+------------------------------------------------------------------+
-void UpdateFiboObject(const FibInfo &fi)
-  {
-   string name = PFX + "fibo";
-
-   if(!DrawFibOnChart || !fi.ok)
-     {
-      if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
-      g_fibTA = 0; g_fibTB = 0; g_fibPA = 0; g_fibPB = 0;
-      return;
-     }
-
-   // ไม่เปลี่ยน Qualified Swing ชุดเดิม -> ไม่ต้องวาดใหม่
-   if(ObjectFind(0, name) >= 0 &&
-      g_fibTA == fi.tA && g_fibTB == fi.tB && g_fibPA == fi.pA && g_fibPB == fi.pB)
-      return;
-
-   if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
-
-   // MT5: Level 0 อยู่ที่จุดที่ 2 (จุดจบ Impulse), Level 1 อยู่ที่จุดที่ 1 (จุดเริ่ม)
-   if(!ObjectCreate(0, name, OBJ_FIBO, 0, fi.tA, fi.pA, fi.tB, fi.pB))
-      return;
-
-   double lv[7] = {0.0, 0.236, 0.382, 0.5, 0.0, 0.0, 1.0};
-   lv[4] = FibGoldenUpper;
-   lv[5] = FibGoldenLower;
-
-   ObjectSetInteger(0, name, OBJPROP_COLOR, FibColor);
-   ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, true);
-   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
-   ObjectSetInteger(0, name, OBJPROP_BACK, true);
-   ObjectSetInteger(0, name, OBJPROP_LEVELS, 7);
-
-   for(int i = 0; i < 7; i++)
-     {
-      bool golden = (lv[i] == FibGoldenUpper || lv[i] == FibGoldenLower);
-      ObjectSetDouble(0, name, OBJPROP_LEVELVALUE, i, lv[i]);
-      ObjectSetInteger(0, name, OBJPROP_LEVELCOLOR, i, golden ? FibGoldenColor : FibColor);
-      ObjectSetInteger(0, name, OBJPROP_LEVELSTYLE, i, golden ? STYLE_SOLID : STYLE_DOT);
-      ObjectSetInteger(0, name, OBJPROP_LEVELWIDTH, i, golden ? 2 : 1);
-      ObjectSetString(0, name, OBJPROP_LEVELTEXT, i, DoubleToString(lv[i], 3) + " (%$)");
-     }
-
-   g_fibTA = fi.tA; g_fibTB = fi.tB; g_fibPA = fi.pA; g_fibPB = fi.pB;
   }
 
 //+------------------------------------------------------------------+
@@ -1055,10 +1048,6 @@ void ScanAndDraw()
    int found = 0;
    int withOB = 0;
 
-   bool    chartFibDone = false;
-   FibInfo chartFib;
-   ResetFib(chartFib);
-
    for(int i = 0; i < total; i++)
      {
       ScanResult r;
@@ -1072,26 +1061,9 @@ void ScanAndDraw()
          g_cache[i]   = r;
          g_lastBar[i] = bt;
         }
-
-      //--- Fibonacci / Golden Zone (M5) - cache แยกต่างหาก
-      FibInfo fi;
-      ResetFib(fi);
-      datetime bf = iTime(g_symbols[i], FibTimeframe, 0);
-      if(bf != 0 && bf == g_lastBarFib[i])
-         fi = g_fibCache[i];
-      else if(ScanSymbolFib(g_symbols[i], fi))
-        {
-         g_fibCache[i]   = fi;
-         g_lastBarFib[i] = bf;
-        }
-      r.fib = fi;
-
-      if(g_symbols[i] == _Symbol)
-        {
-         chartFib = fi;
-         chartFibDone = true;
-        }
-
+      //--- Trend แต่ละ Time frame
+      for(int k = 0; k < 5; k++)
+         r.trend[k] = TrendOf(i, k);
       CalcPctSinceOpen(r);
       r.us = g_isUs[i];
 
@@ -1107,11 +1079,6 @@ void ScanAndDraw()
       results[found] = r;
       found++;
      }
-
-   //--- Symbol ของกราฟไม่อยู่ในรายการ -> สแกนแยก
-   if(!chartFibDone)
-      ScanSymbolFib(_Symbol, chartFib);
-   UpdateFiboObject(chartFib);
 
    if(SortMode != SORT_MARKET_WATCH)
      {
@@ -1229,12 +1196,30 @@ void SetButton(const string name, const string text, const int x, const int y)
    ObjectSetInteger(0, name, OBJPROP_ZORDER, 10);
   }
 
-//--- วางข้อความในเซลล์ของคอลัมน์ (x = ขอบซ้ายของเซลล์)
-void PlaceCell(const string name, const string text, const int x, const int w, const bool right,
-               const int y, const color clr, const int size, const bool bold)
+//--- วางเซลล์แบบเลื่อนเป็นพิกเซล: ตัดตัวอักษรที่ล้นขอบซ้าย/ขวาของพื้นที่เลื่อน (Consolas = ฟอนต์ความกว้างคงที่)
+void PlaceScrollCell(const string name, const string text, const int cellX, const int w, const bool right,
+                     const int y, const color clr, const int size, const bool bold)
   {
-   if(right) SetLbl(name, text, x + w - 10, y, clr, size, bold, ANCHOR_RIGHT_UPPER);
-   else      SetLbl(name, text, x,          y, clr, size, bold, ANCHOR_LEFT_UPPER);
+   string full = PFX + name;
+   int    len  = StringLen(text);
+   int    x0   = right ? cellX + w - 10 - (int)MathRound(len * CharPx) : cellX;
+   int    vl   = DashX + SYM_W;            // ขอบซ้ายของพื้นที่เลื่อน (ต่อจากคอลัมน์ SYMBOL)
+   int    vr   = DashX + SYM_W + VIEW_W;   // ขอบขวา
+   string t    = text;
+
+   if(x0 < vl)
+     {
+      int k = (int)MathCeil((vl - x0) / CharPx);
+      if(k >= len) { ObjectDelete(0, full); return; }
+      t   = StringSubstr(t, k);
+      x0 += (int)MathRound(k * CharPx);
+     }
+
+   int n = (int)MathFloor((vr - x0) / CharPx);
+   if(n <= 0) { ObjectDelete(0, full); return; }
+   if(n < StringLen(t)) t = StringSubstr(t, 0, n);
+
+   SetLbl(name, t, x0, y, clr, size, bold, ANCHOR_LEFT_UPPER);
   }
 
 //--- ข้อความ + สี ของคอลัมน์ที่เลื่อนได้ 1 ช่อง
@@ -1257,18 +1242,18 @@ void CellOf(const ScanResult &r, const int c, string &txt, color &clr)
            }
          else txt = "n/a";
          return;
-      case 2:   // LATEST OB
+      case 2:   // LATEST OB + GRADE
          if(r.hasOB)
            {
-            txt = (r.dir == 1) ? "BULL OB" : "BEAR OB";
+            txt = string(r.dir == 1 ? "BULL OB" : "BEAR OB") + " " + r.grade;
             clr = (r.dir == 1) ? C_GREEN : C_RED;
            }
          return;
-      case 3:   // OB ZONE
+      case 3:   // OB ZONE (Bull = เขียว / Bear = แดง)
          if(r.hasOB)
            {
             txt = Fmt(r.obHigh, r.digits) + " / " + Fmt(r.obLow, r.digits);
-            clr = C_HDR;
+            clr = (r.dir == 1) ? C_GREEN : C_RED;
            }
          return;
       case 4:   // STATUS
@@ -1278,12 +1263,9 @@ void CellOf(const ScanResult &r, const int c, string &txt, color &clr)
             clr = r.retested ? C_MUTED : C_YELLOW;
            }
          return;
-      case 5:   // GOLDEN ZONE
-         if(r.fib.ok)
-           {
-            txt = Fmt(r.fib.gzLo, r.digits) + " - " + Fmt(r.fib.gzHi, r.digits);
-            clr = C_GOLD;
-           }
+      case 5: case 6: case 7: case 8: case 9:   // TREND 1D, 1H, 30M, 15M, 1M
+         if(r.trend[c - 5] == 1)       { txt = "BULL"; clr = C_GREEN; }
+         else if(r.trend[c - 5] == -1) { txt = "BEAR"; clr = C_RED; }
          return;
      }
   }
@@ -1298,15 +1280,14 @@ void DrawRow(const string id, const ScanResult &r, const int y)
    // คอลัมน์ที่ตรึงไว้
    SetLbl("row_sym_" + id, ShortSym(r.symbol), DashX, y, C_HDR, F, false);
 
-   // คอลัมน์ที่เลื่อนได้
-   int x = DashX + SYM_W;
-   for(int c = g_colFirst; c < g_colLast; c++)
+   // คอลัมน์ที่เลื่อนได้ (เลื่อนเป็นพิกเซล + ตัดข้อความที่ล้นขอบ)
+   for(int c = 0; c < N_COLS; c++)
      {
       string txt;
       color  clr;
       CellOf(r, c, txt, clr);
-      PlaceCell("row_c" + IntegerToString(c) + "_" + id, txt, x, ColW(c), ColRight(c), y, clr, F, false);
-      x += ColW(c);
+      PlaceScrollCell("row_c" + IntegerToString(c) + "_" + id, txt, DashX + SYM_W + ColX(c) - (int)g_hOff,
+                      ColW(c), ColRight(c), y, clr, F, false);
      }
   }
 
@@ -1323,44 +1304,14 @@ int DrawSection(const string tag, const string title, ScanResult &arr[], const i
 
    SetRect("sep_" + tag, DashX - 8, y0, PANEL_W, 1, FrameColor, FrameColor);
 
-   string rng = (count == 0) ? "0" :
-                IntegerToString(scr + 1) + "-" + IntegerToString(MathMin(scr + view, count)) +
-                " / " + IntegerToString(count);
-   SetLbl("hdr_" + tag + "_title", title + "  [" + rng + "]", DashX, y0 + 5, FrameColor, 10, true);
-
-   // ปุ่มเลื่อนแนวตั้ง (แสดงเฉพาะเมื่อมีแถวเกินกรอบ)
-   if(count > view)
-     {
-      SetButton(PFX + "btn_" + tag + "_up", "▲", DashX + PANEL_W - 62, y0 + 4);
-      SetButton(PFX + "btn_" + tag + "_dn", "▼", DashX + PANEL_W - 36, y0 + 4);
-     }
-   else
-     {
-      ObjectDelete(0, PFX + "btn_" + tag + "_up");
-      ObjectDelete(0, PFX + "btn_" + tag + "_dn");
-     }
-
-   // ปุ่มเลื่อนแนวนอน (แสดงเฉพาะเมื่อคอลัมน์เกินความกว้าง)
-   if(g_colMax > 0)
-     {
-      SetButton(PFX + "btn_" + tag + "_lf", "◄", DashX + PANEL_W - 114, y0 + 4);
-      SetButton(PFX + "btn_" + tag + "_rt", "►", DashX + PANEL_W - 88,  y0 + 4);
-     }
-   else
-     {
-      ObjectDelete(0, PFX + "btn_" + tag + "_lf");
-      ObjectDelete(0, PFX + "btn_" + tag + "_rt");
-     }
+   SetLbl("hdr_" + tag + "_title", title, DashX, y0 + 5, FrameColor, 10, true);
 
    // แถวหัวตาราง: SYMBOL (ตรึง) + คอลัมน์ที่มองเห็น
    int hy = y0 + 24;
    SetLbl("hdr_" + tag + "_sym", "SYMBOL", DashX, hy, C_HDR, F, true);
-   int hx = DashX + SYM_W;
-   for(int c = g_colFirst; c < g_colLast; c++)
-     {
-      PlaceCell("hdr_" + tag + "_c" + IntegerToString(c), ColHdr(c), hx, ColW(c), ColRight(c), hy, C_HDR, F, true);
-      hx += ColW(c);
-     }
+   for(int c = 0; c < N_COLS; c++)
+      PlaceScrollCell("hdr_" + tag + "_c" + IntegerToString(c), ColHdr(c),
+                      DashX + SYM_W + ColX(c) - (int)g_hOff, ColW(c), ColRight(c), hy, C_HDR, F, true);
    SetRect("hdr_" + tag + "_ln", DashX - 6, y0 + 39, PANEL_W - 4, 1, C'45,45,45', C'45,45,45');
 
    int row0 = y0 + 42;
@@ -1386,58 +1337,124 @@ bool FindRow(const string sym, ScanResult &out)
    return false;
   }
 
-//--- แผง Detail (ดับเบิลคลิกที่แถว) - แสดงข้อมูลวิเคราะห์เท่านั้น ไม่มีคำสั่งซื้อขาย
-int DrawDetail(const int y0)
+//--- ตำแหน่งหน้าต่าง: ชิดขวาของแผงถ้ามีที่ว่าง ไม่งั้นวางใกล้เมาส์ (ไม่ให้ล้นกราฟ)
+void PlacePopup(const int cx, const int cy)
   {
-   const int F = 9;
-   ScanResult w;
-   SetRect("sep_det", DashX - 8, y0, PANEL_W, 1, FrameColor, FrameColor);
+   int cw = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+   int ch = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
 
-   if(!FindRow(g_sel, w))
+   int x = DashX - 8 + PANEL_W + 8;
+   int y = cy - 24;
+   if(x + POP_W > cw - 4)
      {
-      SetLbl("det_0", "No symbol selected", DashX, y0 + 6, C_MUTED, F, false);
-      return y0 + 26;
+      x = cx + 16;
+      y = cy + 12;
+      if(x + POP_W > cw - 4) x = cx - POP_W - 16;
+     }
+   if(y + POP_H > ch - 4) y = ch - POP_H - 4;
+   if(x < 4) x = 4;
+   if(y < 4) y = 4;
+   g_popX = x;
+   g_popY = y;
+  }
+
+//--- แถวสถานะแบบ pill (BOS / FVG / Mitigation) - สี Fade ตามแอนิเมชัน
+void DrawPill(const string id, const string label, const string value, const int x, const int y,
+              const color txt, const color bg)
+  {
+   SetLbl("pop_" + id + "_l", label, x, y, PC(C_HDR), 9, false);
+   int pw = StringLen(value) * 6 + 14;
+   SetRect("pop_" + id + "_bg", x + 88, y - 1, pw, 17, PC(bg), PC(bg));
+   SetLbl("pop_" + id + "_v", value, x + 88 + 7, y + 1, PC(txt), 8, true);
+  }
+
+//--- หน้าต่าง Advanced OB Dashboard (ดับเบิลคลิกที่ Symbol) - แสดงข้อมูลวิเคราะห์เท่านั้น ไม่มีคำสั่งซื้อขาย
+//--- มีแอนิเมชัน: Fade จากสีพื้นกราฟ + เลื่อนขึ้น 14px (ease-out cubic)
+void DrawPopup()
+  {
+   // ปิดสนิทแล้ว (และไม่ได้ถูกสั่งเปิด) -> ลบ object ทิ้ง
+   if(!g_detail && g_popT <= 0.0)
+     {
+      ObjectsDeleteAll(0, PFX + "pop_");
+      return;
      }
 
-   int d = w.digits;
-   string head = "DETAIL  " + w.symbol;
-   if(w.hasOB)
-      head += "   " + string(w.dir == 1 ? "BULL OB" : "BEAR OB") + "   " + (w.retested ? "Retested" : "NOT Retested");
-   SetLbl("det_0", head, DashX, y0 + 6, FrameColor, 10, true);
+   ScanResult w;
+   if(!FindRow(g_detailSym, w))
+     {
+      g_detail  = false;
+      g_popT    = 0.0;
+      g_popAnim = false;
+      ObjectsDeleteAll(0, PFX + "pop_");
+      return;
+     }
 
-   if(w.pctValid)
-      SetLbl("det_1", "Price " + Fmt(w.price, d) + "   Ref(" + OpenRefText() + ") " + Fmt(w.openPrice, d) +
-             "   Chg " + (w.pct >= 0 ? "+" : "") + DoubleToString(w.pct, 2) + "%",
-             DashX, y0 + 26, C_HDR, F, false);
-   else
-      SetLbl("det_1", "Price: n/a", DashX, y0 + 26, C_MUTED, F, false);
+   // ระหว่างแอนิเมชัน (g_light) ไม่ลบทิ้ง แค่อัปเดต object เดิม จะได้ไม่กะพริบ
+   if(!g_light) ObjectsDeleteAll(0, PFX + "pop_");
 
-   if(w.hasOB)
-      SetLbl("det_2", "Latest OB " + TfText(g_tf) + "   Zone " + Fmt(w.obHigh, d) + " / " + Fmt(w.obLow, d) +
-             "   Confirmed " + TimeToString(w.confirmTime, TIME_DATE | TIME_MINUTES) +
-             " (" + IntegerToString(w.barsAgo) + " bars ago)",
-             DashX, y0 + 42, C_HDR, F, false);
-   else
-      SetLbl("det_2", "Latest OB: none found", DashX, y0 + 42, C_MUTED, F, false);
+   g_pe  = 1.0 - MathPow(1.0 - g_popT, 3.0);                     // ease-out cubic
+   g_pbg = (color)ChartGetInteger(0, CHART_COLOR_BACKGROUND);
 
-   if(w.fib.ok)
-      SetLbl("det_3", "Fibo " + TfText(FibTimeframe) + "   " + string(w.fib.dir == 1 ? "BULL" : "BEAR") +
-             " impulse " + Fmt(w.fib.pA, d) + " -> " + Fmt(w.fib.pB, d) +
-             "   Golden Zone " + Fmt(w.fib.gzLo, d) + " - " + Fmt(w.fib.gzHi, d),
-             DashX, y0 + 58, C_GOLD, F, false);
-   else
-      SetLbl("det_3", "Fibo " + TfText(FibTimeframe) + ": n/a (no valid impulse)", DashX, y0 + 58, C_MUTED, F, false);
+   const color C_POPBORDER = C'55,55,55';
+   const color C_OKTXT     = C'0,200,83';
+   const color C_OKBG      = C'10,50,28';
 
-   SetLbl("det_4", "Analysis only. This EA never sends orders.", DashX, y0 + 78, C_MUTED, 8, false);
-   return y0 + 98;
+   int x = g_popX;
+   int y = g_popY + (int)MathRound((1.0 - g_pe) * 14.0);          // เลื่อนขึ้นจากด้านล่าง 14px
+   g_popH = w.hasOB ? POP_H : 78;
+
+   SetRect("pop_bg", x, y, POP_W, g_popH, PC(C'0,0,0'), PC(C_POPBORDER));
+   SetLbl("pop_title", "Advanced OB Dashboard", x + 12, y + 10, PC(C_HDR), 11, true);
+
+   string btn = PFX + "pop_close";
+   SetButton(btn, "X", x + POP_W - 30, y + 9);
+   ObjectSetInteger(0, btn, OBJPROP_COLOR,        PC(C_HDR));
+   ObjectSetInteger(0, btn, OBJPROP_BGCOLOR,      PC(C'20,20,20'));
+   ObjectSetInteger(0, btn, OBJPROP_BORDER_COLOR, PC(FrameColor));
+
+   string info = ShortSym(w.symbol);
+   if(w.hasOB) info += "  " + string(w.dir == 1 ? "BULL" : "BEAR") + "  " + TfText(g_tf);
+   SetLbl("pop_info", info, x + POP_W - 38, y + 13,
+          PC(w.hasOB ? ((w.dir == 1) ? C_GREEN : C_RED) : C_MUTED), 8, false, ANCHOR_RIGHT_UPPER);
+
+   if(!w.hasOB)
+     {
+      SetLbl("pop_none", "No qualified Order Block for this symbol", x + 14, y + 42, PC(C_MUTED), 9, false);
+      return;
+     }
+
+   int c1 = x + 14, c2 = x + 200;
+   SetLbl("pop_k1", "OB Grade",      c1, y + 36, PC(C_HDR), 9, true);
+   SetLbl("pop_v1", w.grade,         c1, y + 52, PC(GradeColor(w.grade)), 13, true);
+   SetLbl("pop_k2", "Quality Score", c2, y + 36, PC(C_HDR), 9, true);
+   SetLbl("pop_v2", DoubleToString(w.score, 0) + "/100", c2, y + 52, PC(clrWhite), 13, true);
+
+   SetLbl("pop_k3", "ATR Strength",  c1, y + 82, PC(C_HDR), 9, true);
+   SetLbl("pop_v3", DoubleToString(w.atrX, 1) + "x",   c1, y + 98, PC(clrWhite), 13, true);
+   SetLbl("pop_k4", "OB Width",      c2, y + 82, PC(C_HDR), 9, true);
+   SetLbl("pop_v4", DoubleToString(w.widthX, 1) + "x", c2, y + 98, PC(clrWhite), 13, true);
+
+   SetRect("pop_div", x + 10, y + 128, POP_W - 20, 1, PC(C'30,30,30'), PC(C'30,30,30'));
+
+   // BOS / FVG ผ่านเสมอ (เป็นเงื่อนไขของการเป็น OB) ส่วน Mitigation ขึ้นกับสถานะจริง
+   DrawPill("bos", "BOS", "Confirmed", x + 10, y + 138, C_OKTXT, C_OKBG);
+   DrawPill("fvg", "FVG", "Detected",  x + 10, y + 158, C_OKTXT, C_OKBG);
+
+   string mt;
+   color  mtC, mtB;
+   if(w.retested)          { mt = "Mitigated";                             mtC = C_RED;    mtB = C'60,15,15'; }
+   else if(w.touches > 0)  { mt = "Touched x" + IntegerToString(w.touches); mtC = C_YELLOW; mtB = C'55,45,0'; }
+   else                    { mt = "Fresh";                                 mtC = C_OKTXT;  mtB = C_OKBG; }
+   DrawPill("mit", "Mitigation", mt, x + 10, y + 178, mtC, mtB);
   }
 
 void DrawDashboard()
   {
-   ObjectsDeleteAll(0, PFX + "row_");
-   ObjectsDeleteAll(0, PFX + "hdr_");
-   ObjectsDeleteAll(0, PFX + "det_");
-   ObjectDelete(0, PFX + "sep_det");
+   if(!g_light)
+     {
+      ObjectsDeleteAll(0, PFX + "row_");
+      ObjectsDeleteAll(0, PFX + "hdr_");
+     }
 
    // สร้างกรอบนอกก่อน เพื่อให้อยู่ใต้ object อื่นทั้งหมด (ปรับขนาดตอนท้าย)
    if(ObjectFind(0, PFX + "frame") < 0)
@@ -1446,21 +1463,17 @@ void DrawDashboard()
    g_viewUS = MathMax(1, ViewRowsUS);
    g_viewOT = MathMax(1, ViewRowsOther);
 
-   // ช่วงเลื่อนแนวนอน + คอลัมน์ที่มองเห็น
-   g_colMax = MaxColScr();
-   if(g_colScr > g_colMax) g_colScr = g_colMax;
-   if(g_colScr < 0)        g_colScr = 0;
-   g_colFirst = g_colScr;
-   g_colLast  = VisibleLast(g_colFirst);
+   // ช่วงเลื่อนแนวนอน (พิกเซล)
+   g_hMax = MathMax(0.0, (double)TotalColsW() - VIEW_W);
+   if(g_hTarget > g_hMax) g_hTarget = g_hMax;
+   if(g_hTarget < 0)      g_hTarget = 0;
+   if(g_hOff > g_hMax)    g_hOff = g_hMax;
+   if(g_hOff < 0)         g_hOff = 0;
 
    // ส่วนหัว
    SetLbl("hdr_title",    "MARKET SCANNER", DashX, DashY, C_HDR, 12, true);
-   SetLbl("hdr_subtitle", "Order Block " + TfText(g_tf) + " | Golden Zone " + TfText(FibTimeframe),
-          DashX, DashY + 20, C_MUTED, 9, false);
-   string colTxt = (g_colMax > 0)
-                   ? " | cols " + IntegerToString(g_colFirst + 1) + "-" + IntegerToString(g_colLast) +
-                     "/" + IntegerToString(N_COLS) + " (Shift+wheel)"
-                   : "";
+   SetLbl("hdr_subtitle", "Order Block " + TfText(g_tf), DashX, DashY + 20, C_MUTED, 9, false);
+   string colTxt = (g_hMax > 0) ? " | Shift+Wheel = scroll" : "";
    SetLbl("hdr_stats", "% vs " + OpenRefText() + " | " + IntegerToString(g_found) + " sym, " +
           IntegerToString(g_withOB) + " OB" + colTxt,
           DashX + PANEL_W - 16, DashY + 4, C_MUTED, 8, false, ANCHOR_RIGHT_UPPER);
@@ -1472,13 +1485,13 @@ void DrawDashboard()
    g_otBot  = g_otTop + SectionHeight(g_viewOT);
    g_otRow0 = g_otTop + 42;
 
-   int bottom = DrawSection("us", "US STOCKS", g_us, ArraySize(g_us), g_scrUs, g_viewUS, g_usTop);
-   bottom     = DrawSection("ot", "OTHER",     g_ot, ArraySize(g_ot), g_scrOt, g_viewOT, g_otTop);
-   if(g_detail)
-      bottom = DrawDetail(bottom);
-
+   int bottom = DrawSection("us", "US Stock", g_us, ArraySize(g_us), g_scrUs, g_viewUS, g_usTop);
+   bottom     = DrawSection("ot", "Other",     g_ot, ArraySize(g_ot), g_scrOt, g_viewOT, g_otTop);
    // กรอบนอก
    SetRect("frame", DashX - 8, DashY - 8, PANEL_W, bottom - (DashY - 8) + 2, C_BG, FrameColor);
+
+   // หน้าต่าง Advanced OB Dashboard (ดับเบิลคลิก) - วาดหลังสุดให้อยู่บนสุด
+   DrawPopup();
 
    ChartRedraw();
   }
