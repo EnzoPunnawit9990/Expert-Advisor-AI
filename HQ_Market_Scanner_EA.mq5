@@ -23,9 +23,14 @@
 //|         Shift+ลูกกลิ้ง = เลื่อนซ้าย-ขวาแบบสมูท (แอนิเมชันเป็นพิกเซล)        |
 //|  v2.08: แอนิเมชันเปิด/ปิดหน้าต่าง Advanced OB Dashboard                  |
 //|         (Fade จากสีพื้นกราฟ + เลื่อนขึ้น 14px, Ease-out)                 |
+//|  v2.09: ระบบตรวจ Breakout + BOS (Break of Structure) ทั้ง Bull / Bear     |
+//|         - Breakout = ปิดทะลุ High/Low สูงสุด-ต่ำสุดของ N แท่งก่อนหน้า       |
+//|         - BOS      = ปิดทะลุ Swing High/Low ล่าสุด (Pivot)                 |
+//|         เพิ่มคอลัมน์ BREAKOUT / BOS ในหน้าต่างหลัก + แถวในหน้าต่าง Detail   |
+//|         เพิ่มโหมดเรียง SORT_SIGNAL_FIRST และตัวกรอง SignalFilter           |
 //+------------------------------------------------------------------+
 #property copyright "HQ-OB MT5 Scanner"
-#property version   "2.08"
+#property version   "2.09"
 
 //---------------------------------------------------------------- Enums
 enum ENUM_MITIGATION_METHOD
@@ -48,7 +53,18 @@ enum ENUM_HQ_SORT
    SORT_MARKET_WATCH,  // ตามลำดับใน Market Watch
    SORT_PCT_DESC,      // % มากไปน้อย
    SORT_ABS_PCT_DESC,  // |%| มากไปน้อย
-   SORT_OB_FIRST       // OB ที่ยังไม่ Retest + ใหม่สุดก่อน
+   SORT_OB_FIRST,      // OB ที่ยังไม่ Retest + ใหม่สุดก่อน
+   SORT_SIGNAL_FIRST   // ตัวที่เกิด Breakout / BOS ล่าสุดก่อน
+  };
+
+enum ENUM_SIG_FILTER
+  {
+   SIGF_OFF,        // ไม่กรอง (แสดงตามปกติ)
+   SIGF_ANY,        // เฉพาะที่มี Breakout หรือ BOS
+   SIGF_BREAKOUT,   // เฉพาะที่เกิด Breakout
+   SIGF_BOS,        // เฉพาะที่เกิด BOS
+   SIGF_BULL,       // เฉพาะฝั่ง Bull (Breakout หรือ BOS)
+   SIGF_BEAR        // เฉพาะฝั่ง Bear (Breakout หรือ BOS)
   };
 
 //---------------------------------------------------------------- Inputs
@@ -75,6 +91,14 @@ input int    MaxObToFvgDistance          = 3;
 input group "Mitigation"
 input ENUM_MITIGATION_METHOD MitigationMethod = CLOSE_INSIDE_OB;
 input bool   ShowMitigatedOB             = true;  // true = Latest OB รวมที่ Mitigate แล้ว (สถานะ Retested), false = เฉพาะที่ยัง Fresh
+
+input group "Breakout & BOS Signals"
+input int    SignalBars                  = 300;   // จำนวนแท่งที่ใช้หา Breakout / BOS
+input int    BreakoutLookback            = 20;    // Breakout: ปิดทะลุ High/Low สูงสุด-ต่ำสุดของ N แท่งก่อนหน้า
+input double BreakoutMinBreakATR         = 0.0;   // Breakout: ระยะที่ปิดเลยระดับ (x ATR) ขั้นต่ำ, 0 = ไม่กรอง
+input bool   BosContinuationOnly         = false; // true = BOS เฉพาะที่ทะลุ "ตามเทรนด์เดิม" (ตัดฝั่งกลับตัว/CHoCH ออก)
+input int    SignalMaxBars               = 5;     // นับว่า "เพิ่งเกิด" ถ้าเกิดภายในกี่แท่งล่าสุด (0 = เฉพาะแท่งปิดล่าสุด)
+input ENUM_SIG_FILTER SignalFilter       = SIGF_OFF; // กรอง Symbol ตามสัญญาณ
 
 input group "ATR Strength"
 input double MinAtrShow                  = 3.0;   // Minimum ATR Strength to Display (x ATR)
@@ -141,15 +165,21 @@ struct ScanResult
    double   fvgX;         // ขนาด FVG (x ATR)
    int      touches;      // จำนวนครั้งที่ราคาแตะโซนแต่ยังไม่ Mitigate
    int      trend[5];     // Trend 1D, 1H, 30M, 15M, 1M (1 = Bull, -1 = Bear, 0 = n/a)
+   int      boDir;        // Breakout: 1 = Bull, -1 = Bear, 0 = ไม่มี
+   int      boBars;       // Breakout เกิดเมื่อกี่แท่งก่อน (0 = แท่งปิดล่าสุด)
+   double   boLevel;      // ระดับที่ทะลุ
+   int      bosDir;       // BOS: 1 = Bull, -1 = Bear, 0 = ไม่มี
+   int      bosBars;
+   double   bosLevel;
   };
 
 ScanResult g_cache[];
 
 //--- Dashboard state
 #define ROW_H    16
-#define N_COLS   10                       // PRICE, % CHG, LATEST OB, OB ZONE, STATUS, TREND 1D/1H/30M/15M/1M
+#define N_COLS   12                       // PRICE, % CHG, BREAKOUT, BOS, LATEST OB, OB ZONE, STATUS, TREND 1D/1H/30M/15M/1M
 #define POP_W    390                      // หน้าต่าง Advanced OB Dashboard (ดับเบิลคลิก)
-#define POP_H    202
+#define POP_H    262
 #define SYM_W    90                       // ความกว้างคอลัมน์ SYMBOL (ตรึง)
 #define PANEL_W  780
 #define VIEW_W   (PANEL_W - 16 - SYM_W)   // ความกว้างพื้นที่คอลัมน์ที่เลื่อนได้
@@ -167,7 +197,7 @@ int        g_trVal[];                                 // ผล Trend ที่ 
 bool       g_origMouseScroll = true;
 bool       g_origEvMove = false, g_origEvWheel = true;
 bool       g_inside = false;
-int        g_found = 0, g_withOB = 0;
+int        g_found = 0, g_withOB = 0, g_withSig = 0;
 int        g_usTop = 0, g_usBot = 0, g_otTop = 0, g_otBot = 0;
 int        g_usRow0 = 0, g_otRow0 = 0, g_viewUS = 1, g_viewOT = 1;
 
@@ -301,22 +331,25 @@ void OnTimer()
 
 //+------------------------------------------------------------------+
 //| COLUMN LAYOUT (SYMBOL ตรึง, คอลัมน์อื่นเลื่อนแนวนอนได้)             |
-//|   0 PRICE  1 % CHG  2 LATEST OB  3 OB ZONE  4 STATUS               |
+//|   0 PRICE  1 % CHG  2 BREAKOUT  3 BOS  4 LATEST OB  5 OB ZONE      |
+//|   6 STATUS  7-11 TREND (1D 1H 30M 15M 1M)                          |
 //+------------------------------------------------------------------+
 int ColW(const int c)
   {
    switch(c)
      {
-      case 0: return 80;    // PRICE
-      case 1: return 80;    // % CHG
-      case 2: return 110;   // LATEST OB (+ Grade)
-      case 3: return 160;   // OB ZONE
-      case 4: return 105;   // STATUS
-      case 5: return 56;    // TREND 1D
-      case 6: return 56;    // TREND 1H
-      case 7: return 56;    // TREND 30M
-      case 8: return 56;    // TREND 15M
-      case 9: return 56;    // TREND 1M
+      case 0:  return 80;    // PRICE
+      case 1:  return 80;    // % CHG
+      case 2:  return 100;   // BREAKOUT
+      case 3:  return 100;   // BOS
+      case 4:  return 110;   // LATEST OB (+ Grade)
+      case 5:  return 160;   // OB ZONE
+      case 6:  return 105;   // STATUS
+      case 7:  return 56;    // TREND 1D
+      case 8:  return 56;    // TREND 1H
+      case 9:  return 56;    // TREND 30M
+      case 10: return 56;    // TREND 15M
+      case 11: return 56;    // TREND 1M
      }
    return 80;
   }
@@ -330,16 +363,18 @@ string ColHdr(const int c)
   {
    switch(c)
      {
-      case 0: return "PRICE";
-      case 1: return "% CHG";
-      case 2: return "LATEST OB";
-      case 3: return "OB ZONE";
-      case 4: return "STATUS";
-      case 5: return "1D";
-      case 6: return "1H";
-      case 7: return "30M";
-      case 8: return "15M";
-      case 9: return "1M";
+      case 0:  return "PRICE";
+      case 1:  return "% CHG";
+      case 2:  return "BREAKOUT";
+      case 3:  return "BOS";
+      case 4:  return "LATEST OB";
+      case 5:  return "OB ZONE";
+      case 6:  return "STATUS";
+      case 7:  return "1D";
+      case 8:  return "1H";
+      case 9:  return "30M";
+      case 10: return "15M";
+      case 11: return "1M";
      }
    return "";
   }
@@ -637,6 +672,12 @@ void ResetResult(ScanResult &r, const string sym)
    r.touches     = 0;
    for(int k = 0; k < 5; k++)
       r.trend[k] = 0;
+   r.boDir    = 0;
+   r.boBars   = 0;
+   r.boLevel  = 0.0;
+   r.bosDir   = 0;
+   r.bosBars  = 0;
+   r.bosLevel = 0.0;
   }
 
 //+------------------------------------------------------------------+
@@ -1010,6 +1051,135 @@ bool ScanSymbolLatestOB(const string sym, ScanResult &res)
   }
 
 //+------------------------------------------------------------------+
+//| BREAKOUT + BOS (Break of Structure) ทั้ง Bull / Bear               |
+//|  - Breakout: แท่งปิดทะลุ High สูงสุด (Bull) / Low ต่ำสุด (Bear)      |
+//|              ของ BreakoutLookback แท่งก่อนหน้า (นับแท่งแรกของการทะลุ)  |
+//|  - BOS:      แท่งปิดทะลุ Swing High (Bull) / Swing Low (Bear) ล่าสุด  |
+//|              นับครั้งเดียวต่อ 1 Pivot (ใช้ Pivot เดียวกับระบบ OB)       |
+//|  ใช้เฉพาะแท่งที่ปิดแล้ว และแสดงเฉพาะที่เกิดภายใน SignalMaxBars แท่ง     |
+//+------------------------------------------------------------------+
+string AgeTxt(const int bars)
+  {
+   return (bars <= 0) ? "NEW" : IntegerToString(bars) + "b";
+  }
+
+void ScanSymbolSignals(const string sym, ScanResult &res)
+  {
+   res.boDir = 0;  res.boBars = 0;  res.boLevel = 0.0;
+   res.bosDir = 0; res.bosBars = 0; res.bosLevel = 0.0;
+
+   MqlRates r[];
+   ArraySetAsSeries(r, false);
+   int n = CopyRates(sym, g_tf, 1, SignalBars, r);
+   int L = MathMax(2, BreakoutLookback);
+   if(n < MathMax(L, SwingLength * 2 + 1) + AtrLength + 5) return;
+
+   double structHigh = 0, structLow = 0;
+   bool   hasH = false, hasL = false, usedH = true, usedL = true;
+   int    structTrend = 0;                 // เทรนด์จากโครงสร้างล่าสุด: 1 = Bull, -1 = Bear
+   double atrSum = 0, atrPrev = 0;
+   bool   prevBoBull = false, prevBoBear = false;
+
+   for(int i = 0; i < n; i++)
+     {
+      //--- ATR (RMA) เหมือนระบบ OB
+      double tr = (i == 0) ? (r[i].high - r[i].low)
+                  : MathMax(r[i].high - r[i].low,
+                            MathMax(MathAbs(r[i].high - r[i-1].close),
+                                    MathAbs(r[i].low  - r[i-1].close)));
+      double atrVal = 0;
+      if(i < AtrLength - 1)
+         atrSum += tr;
+      else if(i == AtrLength - 1)
+        {
+         atrPrev = (atrSum + tr) / AtrLength;
+         atrVal  = atrPrev;
+        }
+      else
+        {
+         atrPrev = (atrPrev * (AtrLength - 1) + tr) / AtrLength;
+         atrVal  = atrPrev;
+        }
+
+      //--- Swing Pivot ล่าสุด (Pivot ใหม่ = รีเซ็ตสถานะ "ถูกทะลุแล้ว")
+      double v;
+      if(PivotHighAt(r, i, v)) { structHigh = v; hasH = true; usedH = false; }
+      if(PivotLowAt(r, i, v))  { structLow  = v; hasL = true; usedL = false; }
+
+      if(atrVal <= 0.0) continue;
+
+      //--- BOS
+      if(hasH && !usedH && r[i].close > structHigh)
+        {
+         usedH = true;
+         if(!(BosContinuationOnly && structTrend == -1))
+           {
+            res.bosDir   = 1;
+            res.bosBars  = (n - 1) - i;
+            res.bosLevel = structHigh;
+           }
+         structTrend = 1;
+        }
+      if(hasL && !usedL && r[i].close < structLow)
+        {
+         usedL = true;
+         if(!(BosContinuationOnly && structTrend == 1))
+           {
+            res.bosDir   = -1;
+            res.bosBars  = (n - 1) - i;
+            res.bosLevel = structLow;
+           }
+         structTrend = -1;
+        }
+
+      //--- Breakout (Range ของ L แท่งก่อนหน้าแท่ง i)
+      if(i >= L)
+        {
+         double hh = r[i - L].high, ll = r[i - L].low;
+         for(int k = i - L + 1; k <= i - 1; k++)
+           {
+            if(r[k].high > hh) hh = r[k].high;
+            if(r[k].low  < ll) ll = r[k].low;
+           }
+         bool boBull = (r[i].close > hh) && ((r[i].close - hh) / atrVal >= BreakoutMinBreakATR);
+         bool boBear = (r[i].close < ll) && ((ll - r[i].close) / atrVal >= BreakoutMinBreakATR);
+
+         if(boBull && !prevBoBull) { res.boDir = 1;  res.boBars = (n - 1) - i; res.boLevel = hh; }
+         if(boBear && !prevBoBear) { res.boDir = -1; res.boBars = (n - 1) - i; res.boLevel = ll; }
+         prevBoBull = boBull;
+         prevBoBear = boBear;
+        }
+     }
+
+   //--- เก็บเฉพาะที่เพิ่งเกิด
+   if(res.boDir  != 0 && res.boBars  > SignalMaxBars) { res.boDir  = 0; res.boBars  = 0; res.boLevel  = 0.0; }
+   if(res.bosDir != 0 && res.bosBars > SignalMaxBars) { res.bosDir = 0; res.bosBars = 0; res.bosLevel = 0.0; }
+  }
+
+//--- อายุของสัญญาณล่าสุด (แท่ง) ยิ่งน้อยยิ่งใหม่ / ไม่มีสัญญาณ = ค่ามาก
+int SigAge(const ScanResult &r)
+  {
+   int a = INT_MAX;
+   if(r.boDir  != 0) a = MathMin(a, r.boBars);
+   if(r.bosDir != 0) a = MathMin(a, r.bosBars);
+   return a;
+  }
+
+bool PassSignalFilter(const ScanResult &r)
+  {
+   switch(SignalFilter)
+     {
+      case SIGF_ANY:      return (r.boDir != 0 || r.bosDir != 0);
+      case SIGF_BREAKOUT: return (r.boDir != 0);
+      case SIGF_BOS:      return (r.bosDir != 0);
+      case SIGF_BULL:     return (r.boDir == 1 || r.bosDir == 1);
+      case SIGF_BEAR:     return (r.boDir == -1 || r.bosDir == -1);
+      default:            return true;
+     }
+   return true;
+  }
+
+//+------------------------------------------------------------------+
 int ObRank(const ScanResult &r)
   {
    if(!r.hasOB) return 0;
@@ -1034,6 +1204,12 @@ bool ShouldSwap(const ScanResult &a, const ScanResult &b)
          if(ra > 0 && b.confirmTime != a.confirmTime) return (b.confirmTime > a.confirmTime);
          return (MathAbs(b.pct) > MathAbs(a.pct));
         }
+      case SORT_SIGNAL_FIRST:
+        {
+         int sa = SigAge(a), sb = SigAge(b);
+         if(sa != sb) return (sb < sa);
+         return (MathAbs(b.pct) > MathAbs(a.pct));
+        }
       default:
          return false;
      }
@@ -1047,6 +1223,7 @@ void ScanAndDraw()
    ScanResult results[];
    int found = 0;
    int withOB = 0;
+   int withSig = 0;
 
    for(int i = 0; i < total; i++)
      {
@@ -1056,10 +1233,15 @@ void ScanAndDraw()
       datetime bt = iTime(g_symbols[i], g_tf, 0);
       if(bt != 0 && bt == g_lastBar[i])
          r = g_cache[i];
-      else if(ScanSymbolLatestOB(g_symbols[i], r))
+      else
         {
-         g_cache[i]   = r;
-         g_lastBar[i] = bt;
+         bool ok = ScanSymbolLatestOB(g_symbols[i], r);
+         ScanSymbolSignals(g_symbols[i], r);      // Breakout + BOS
+         if(ok)
+           {
+            g_cache[i]   = r;
+            g_lastBar[i] = bt;
+           }
         }
       //--- Trend แต่ละ Time frame
       for(int k = 0; k < 5; k++)
@@ -1068,12 +1250,14 @@ void ScanAndDraw()
       r.us = g_isUs[i];
 
       if(r.hasOB) withOB++;
+      if(r.boDir != 0 || r.bosDir != 0) withSig++;
 
       if(!ShowAllSymbols)
         {
          if(!r.hasOB) continue;
          if(ShowOnlyNotRetested && r.retested) continue;
         }
+      if(!PassSignalFilter(r)) continue;
 
       ArrayResize(results, found+1);
       results[found] = r;
@@ -1111,6 +1295,7 @@ void ScanAndDraw()
 
    g_found  = found;
    g_withOB = withOB;
+   g_withSig = withSig;
    DrawDashboard();
   }
 
@@ -1242,30 +1427,44 @@ void CellOf(const ScanResult &r, const int c, string &txt, color &clr)
            }
          else txt = "n/a";
          return;
-      case 2:   // LATEST OB + GRADE
+      case 2:   // BREAKOUT
+         if(r.boDir != 0)
+           {
+            txt = string(r.boDir == 1 ? "BULL" : "BEAR") + " " + AgeTxt(r.boBars);
+            clr = (r.boDir == 1) ? C_GREEN : C_RED;
+           }
+         return;
+      case 3:   // BOS
+         if(r.bosDir != 0)
+           {
+            txt = string(r.bosDir == 1 ? "BULL" : "BEAR") + " " + AgeTxt(r.bosBars);
+            clr = (r.bosDir == 1) ? C_GREEN : C_RED;
+           }
+         return;
+      case 4:   // LATEST OB + GRADE
          if(r.hasOB)
            {
             txt = string(r.dir == 1 ? "BULL OB" : "BEAR OB") + " " + r.grade;
             clr = (r.dir == 1) ? C_GREEN : C_RED;
            }
          return;
-      case 3:   // OB ZONE (Bull = เขียว / Bear = แดง)
+      case 5:   // OB ZONE (Bull = เขียว / Bear = แดง)
          if(r.hasOB)
            {
             txt = Fmt(r.obHigh, r.digits) + " / " + Fmt(r.obLow, r.digits);
             clr = (r.dir == 1) ? C_GREEN : C_RED;
            }
          return;
-      case 4:   // STATUS
+      case 6:   // STATUS
          if(r.hasOB)
            {
             txt = r.retested ? "Retested" : "NOT Retested";
             clr = r.retested ? C_MUTED : C_YELLOW;
            }
          return;
-      case 5: case 6: case 7: case 8: case 9:   // TREND 1D, 1H, 30M, 15M, 1M
-         if(r.trend[c - 5] == 1)       { txt = "BULL"; clr = C_GREEN; }
-         else if(r.trend[c - 5] == -1) { txt = "BEAR"; clr = C_RED; }
+      case 7: case 8: case 9: case 10: case 11:   // TREND 1D, 1H, 30M, 15M, 1M
+         if(r.trend[c - 7] == 1)       { txt = "BULL"; clr = C_GREEN; }
+         else if(r.trend[c - 7] == -1) { txt = "BEAR"; clr = C_RED; }
          return;
      }
   }
@@ -1368,6 +1567,33 @@ void DrawPill(const string id, const string label, const string value, const int
    SetLbl("pop_" + id + "_v", value, x + 88 + 7, y + 1, PC(txt), 8, true);
   }
 
+//--- แถว Breakout / BOS ในหน้าต่าง Detail
+void SigPill(const string id, const string label, const int dir, const int bars,
+             const double lvl, const int digits, const int x, const int y)
+  {
+   string t;
+   color  tc, bc;
+   if(dir == 0)
+     {
+      t = "None";
+      tc = C_MUTED;
+      bc = C'25,25,25';
+     }
+   else if(dir == 1)
+     {
+      t = "Bullish @ " + Fmt(lvl, digits) + " (" + AgeTxt(bars) + ")";
+      tc = C'0,200,83';
+      bc = C'10,50,28';
+     }
+   else
+     {
+      t = "Bearish @ " + Fmt(lvl, digits) + " (" + AgeTxt(bars) + ")";
+      tc = C_RED;
+      bc = C'60,15,15';
+     }
+   DrawPill(id, label, t, x, y, tc, bc);
+  }
+
 //--- หน้าต่าง Advanced OB Dashboard (ดับเบิลคลิกที่ Symbol) - แสดงข้อมูลวิเคราะห์เท่านั้น ไม่มีคำสั่งซื้อขาย
 //--- มีแอนิเมชัน: Fade จากสีพื้นกราฟ + เลื่อนขึ้น 14px (ease-out cubic)
 void DrawPopup()
@@ -1401,7 +1627,7 @@ void DrawPopup()
 
    int x = g_popX;
    int y = g_popY + (int)MathRound((1.0 - g_pe) * 14.0);          // เลื่อนขึ้นจากด้านล่าง 14px
-   g_popH = w.hasOB ? POP_H : 78;
+   g_popH = w.hasOB ? POP_H : 112;
 
    SetRect("pop_bg", x, y, POP_W, g_popH, PC(C'0,0,0'), PC(C_POPBORDER));
    SetLbl("pop_title", "Advanced OB Dashboard", x + 12, y + 10, PC(C_HDR), 11, true);
@@ -1419,7 +1645,9 @@ void DrawPopup()
 
    if(!w.hasOB)
      {
-      SetLbl("pop_none", "No qualified Order Block for this symbol", x + 14, y + 42, PC(C_MUTED), 9, false);
+      SetLbl("pop_none", "No qualified Order Block for this symbol", x + 14, y + 36, PC(C_MUTED), 9, false);
+      SigPill("sbo", "Breakout", w.boDir,  w.boBars,  w.boLevel,  w.digits, x + 10, y + 62);
+      SigPill("sbs", "BOS",      w.bosDir, w.bosBars, w.bosLevel, w.digits, x + 10, y + 82);
       return;
      }
 
@@ -1446,6 +1674,10 @@ void DrawPopup()
    else if(w.touches > 0)  { mt = "Touched x" + IntegerToString(w.touches); mtC = C_YELLOW; mtB = C'55,45,0'; }
    else                    { mt = "Fresh";                                 mtC = C_OKTXT;  mtB = C_OKBG; }
    DrawPill("mit", "Mitigation", mt, x + 10, y + 178, mtC, mtB);
+
+   SetRect("pop_div2", x + 10, y + 204, POP_W - 20, 1, PC(C'30,30,30'), PC(C'30,30,30'));
+   SigPill("sbo", "Breakout", w.boDir,  w.boBars,  w.boLevel,  w.digits, x + 10, y + 214);
+   SigPill("sbs", "BOS",      w.bosDir, w.bosBars, w.bosLevel, w.digits, x + 10, y + 234);
   }
 
 void DrawDashboard()
@@ -1475,7 +1707,8 @@ void DrawDashboard()
    SetLbl("hdr_subtitle", "Order Block " + TfText(g_tf), DashX, DashY + 20, C_MUTED, 9, false);
    string colTxt = (g_hMax > 0) ? " | Shift+Wheel = scroll" : "";
    SetLbl("hdr_stats", "% vs " + OpenRefText() + " | " + IntegerToString(g_found) + " sym, " +
-          IntegerToString(g_withOB) + " OB" + colTxt,
+          IntegerToString(g_withOB) + " OB, " +
+          IntegerToString(g_withSig) + " SIG" + colTxt,
           DashX + PANEL_W - 16, DashY + 4, C_MUTED, 8, false, ANCHOR_RIGHT_UPPER);
 
    g_usTop  = DashY + 38;
